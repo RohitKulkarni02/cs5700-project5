@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""
+Raw HTTP/1.1 over TLS for the Fakebook crawler.
+
+Handles the parts we can't use a library for: building requests, parsing
+responses, chunked decoding, gzip, and cookies. The crawler only uses
+HTTPClient.get/post and the returned HTTPResponse.
+"""
+
+import gzip
+import socket
+import ssl
+import zlib
+from urllib.parse import urlencode
+
+
+MAX_503_RETRIES = 50
+RECV_SIZE = 65536
+
+
+class HTTPResponse:
+    """status (int), reason (str), headers (dict, lowercase keys), body (str)."""
+
+    def __init__(self, status, reason, headers, body):
+        self.status = status
+        self.reason = reason
+        self.headers = headers
+        self.body = body
+
+    def __repr__(self):
+        return "<HTTPResponse %d %s, %d bytes>" % (
+            self.status,
+            self.reason,
+            len(self.body),
+        )
+
+
+class _SocketReader:
+    """Buffers socket reads so we can grab whole lines or exact byte counts
+    without reading past the end of one response."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b""
+
+    def _fill(self):
+        chunk = self.sock.recv(RECV_SIZE)
+        if not chunk:
+            raise ConnectionError("server closed the connection")
+        self.buf += chunk
+
+    def read_line(self):
+        while b"\r\n" not in self.buf:
+            self._fill()
+        line, self.buf = self.buf.split(b"\r\n", 1)
+        return line
+
+    def read_exactly(self, n):
+        while len(self.buf) < n:
+            self._fill()
+        data, self.buf = self.buf[:n], self.buf[n:]
+        return data
+
+
+class HTTPClient:
+    """HTTP/1.1 client over one keep-alive (TLS) connection. Reconnects if the
+    server drops it, and keeps a cookie jar so the crawler ignores cookies."""
+
+    def __init__(self, host, port, use_tls=True):
+        self.host = host
+        self.port = port
+        self.use_tls = use_tls
+        self.sock = None
+        self.reader = None
+        self.cookies = {}  # name -> value
+
+    # ----- connection management -------------------------------------------
+
+    def connect(self):
+        raw = socket.create_connection((self.host, self.port))
+        if self.use_tls:
+            context = ssl.create_default_context()
+            raw = context.wrap_socket(raw, server_hostname=self.host)
+        self.sock = raw
+        self.reader = _SocketReader(raw)
+
+    def close(self):
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            finally:
+                self.sock = None
+                self.reader = None
+
+    def _ensure_connection(self):
+        if self.sock is None:
+            self.connect()
+
+    # ----- cookie jar ------------------------------------------------------
+
+    def get_cookie(self, name):
+        return self.cookies.get(name)
+
+    def _store_cookies(self, headers_list):
+        # Use the raw header list, not the dict, since a response can have
+        # several Set-Cookie lines.
+        for name, value in headers_list:
+            if name.lower() != "set-cookie":
+                continue
+            # "sessionid=abc123; Path=/; HttpOnly" -> sessionid=abc123
+            cookie = value.split(";", 1)[0].strip()
+            if "=" in cookie:
+                cname, cval = cookie.split("=", 1)
+                self.cookies[cname.strip()] = cval.strip()
+
+    def _cookie_header(self):
+        if not self.cookies:
+            return None
+        return "; ".join("%s=%s" % (k, v) for k, v in self.cookies.items())
+
+    # ----- public request API ---------------------------------------------
+
+    def get(self, path, extra_headers=None):
+        return self._request_with_retry("GET", path, None, extra_headers)
+
+    def post(self, path, form_fields, extra_headers=None):
+        """POST a dict as application/x-www-form-urlencoded."""
+        body = urlencode(form_fields).encode("ascii")
+        headers = dict(extra_headers or {})
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        return self._request_with_retry("POST", path, body, headers)
+
+    # ----- request internals ----------------------------------------------
+
+    def _request_with_retry(self, method, path, body, extra_headers):
+        # Retry 503 here; every other status goes back to the caller.
+        attempts = 0
+        while True:
+            response = self._request_once(method, path, body, extra_headers)
+            if response.status == 503 and attempts < MAX_503_RETRIES:
+                attempts += 1
+                continue
+            return response
+
+    def _request_once(self, method, path, body, extra_headers):
+        # If a kept-alive socket was closed under us, reconnect and try once more.
+        for attempt in range(2):
+            self._ensure_connection()
+            try:
+                self._send_request(method, path, body, extra_headers)
+                return self._read_response()
+            except (ConnectionError, ssl.SSLError, socket.error):
+                self.close()
+                if attempt == 1:
+                    raise
+
+    def _send_request(self, method, path, body, extra_headers):
+        lines = ["%s %s HTTP/1.1" % (method, path)]
+        headers = {
+            "Host": self.host,
+            "Connection": "keep-alive",
+            "Accept-Encoding": "gzip",
+            "Accept": "*/*",
+        }
+        if body is not None:
+            headers["Content-Length"] = str(len(body))
+        cookie = self._cookie_header()
+        if cookie:
+            headers["Cookie"] = cookie
+        if extra_headers:
+            headers.update(extra_headers)
+
+        for name, value in headers.items():
+            lines.append("%s: %s" % (name, value))
+        raw = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+        if body is not None:
+            raw += body
+        self.sock.sendall(raw)
+
+    def _read_response(self):
+        status, reason = self._read_status_line()
+        headers_list = self._read_headers()
+        self._store_cookies(headers_list)
+        # dict with lowercase keys, last value wins.
+        headers = {}
+        for name, value in headers_list:
+            headers[name.lower()] = value
+
+        raw_body = self._read_body(headers)
+        body = self._decode_body(headers, raw_body)
+
+        if headers.get("connection", "").lower() == "close":
+            self.close()
+
+        return HTTPResponse(status, reason, headers, body)
+
+    def _read_status_line(self):
+        line = self.reader.read_line().decode("iso-8859-1")
+        # "HTTP/1.1 200 OK"
+        parts = line.split(" ", 2)
+        if len(parts) < 2:
+            raise ConnectionError("malformed status line: %r" % line)
+        status = int(parts[1])
+        reason = parts[2] if len(parts) > 2 else ""
+        return status, reason
+
+    def _read_headers(self):
+        headers = []
+        while True:
+            line = self.reader.read_line().decode("iso-8859-1")
+            if line == "":
+                break
+            if ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            headers.append((name.strip(), value.strip()))
+        return headers
+
+    def _read_body(self, headers):
+        if headers.get("transfer-encoding", "").lower() == "chunked":
+            return self._read_chunked()
+        if "content-length" in headers:
+            return self.reader.read_exactly(int(headers["content-length"]))
+        # No length, not chunked: e.g. a 302 with no body.
+        return b""
+
+    def _read_chunked(self):
+        body = b""
+        while True:
+            size_line = self.reader.read_line().decode("iso-8859-1")
+            # Chunk size, ignoring any ';' extensions.
+            size = int(size_line.split(";", 1)[0].strip(), 16)
+            if size == 0:
+                # Skip optional trailers up to the final blank line.
+                while self.reader.read_line() != b"":
+                    pass
+                break
+            body += self.reader.read_exactly(size)
+            self.reader.read_exactly(2)  # CRLF after each chunk
+        return body
+
+    def _decode_body(self, headers, raw_body):
+        encoding = headers.get("content-encoding", "").lower()
+        if encoding == "gzip":
+            try:
+                raw_body = gzip.decompress(raw_body)
+            except (OSError, EOFError):
+                pass
+        elif encoding == "deflate":
+            try:
+                raw_body = zlib.decompress(raw_body)
+            except zlib.error:
+                raw_body = zlib.decompress(raw_body, -zlib.MAX_WBITS)
+        return raw_body.decode("utf-8", errors="replace")

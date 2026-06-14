@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""
+Fakebook web crawler.
+
+    ./4700crawler [-s server] [-p port] <username> <password>
+
+The HTTP/TLS layer lives in http_client.py and is done. The methods marked
+TODO below are the crawl logic and still need to be written. The crawler only
+uses client.get/post and the HTTPResponse they return.
+"""
+
+import argparse
+
+from http_client import HTTPClient
+
+DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
+DEFAULT_PORT = 443
+
+LOGIN_PATH = "/accounts/login/?next=/fakebook/"
+ROOT_PATH = "/fakebook/"
+NUM_FLAGS = 5
+
+
+class Crawler:
+    def __init__(self, args):
+        self.server = args.server
+        self.port = args.port
+        self.username = args.username
+        self.password = args.password
+        self.client = HTTPClient(self.server, self.port, use_tls=True)
+
+        self.frontier = []          # paths still to visit
+        self.visited = set()        # paths already crawled
+        self.flags = []             # secret flags found
+
+    # ----- TODO: login -----------------------------------------------------
+    def login(self):
+        """Log in to Fakebook.
+
+        1. GET LOGIN_PATH. The client grabs the csrftoken cookie on its own
+           (see client.get_cookie('csrftoken')).
+        2. Parse the form for the hidden 'csrfmiddlewaretoken' field.
+        3. POST username, password, csrfmiddlewaretoken, next=/fakebook/.
+           The client sends the cookie and stores the sessionid it gets back.
+        4. Follow the 302 on success.
+
+        Note: the CSRF token shows up in both a cookie and a hidden field.
+        """
+        raise NotImplementedError("teammate: implement login()")
+
+    # ----- TODO: HTML parsing ----------------------------------------------
+    def extract_links(self, html):
+        """Return in-domain /fakebook/ paths from <a href> tags. Use
+        html.parser. Drop external domains and non-/fakebook/ links."""
+        raise NotImplementedError("teammate: implement extract_links()")
+
+    def extract_flags(self, html):
+        """Return the 64-char flags from
+        <h3 class='secret_flag' ...>FLAG: ...</h3> (without the 'FLAG: ')."""
+        raise NotImplementedError("teammate: implement extract_flags()")
+
+    # ----- TODO: crawl loop ------------------------------------------------
+    def crawl(self):
+        """Pull paths off the frontier, GET them, and collect links + flags
+        until NUM_FLAGS are found. 503 is already retried by the client.
+          200 -> parse links + flags
+          302 -> requeue the Location header
+          403/404 -> drop the path
+        Skip visited paths so A<->B friend links don't loop."""
+        raise NotImplementedError("teammate: implement crawl()")
+
+    def run(self):
+        self.login()
+        self.frontier.append(ROOT_PATH)
+        self.crawl()
+        for flag in self.flags[:NUM_FLAGS]:
+            print(flag)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="crawl Fakebook")
+    parser.add_argument("-s", dest="server", type=str, default=DEFAULT_SERVER,
+                        help="The server to crawl")
+    parser.add_argument("-p", dest="port", type=int, default=DEFAULT_PORT,
+                        help="The port to use")
+    parser.add_argument("username", type=str, help="The username to use")
+    parser.add_argument("password", type=str, help="The password to use")
+    args = parser.parse_args()
+    Crawler(args).run()
