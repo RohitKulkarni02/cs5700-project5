@@ -10,6 +10,8 @@ uses client.get/post and the HTTPResponse they return.
 """
 
 import argparse
+from html.parser import HTMLParser
+from urllib.parse import urlsplit, urlunsplit
 
 from http_client import HTTPClient
 
@@ -19,6 +21,86 @@ DEFAULT_PORT = 443
 LOGIN_PATH = "/accounts/login/?next=/fakebook/"
 ROOT_PATH = "/fakebook/"
 NUM_FLAGS = 5
+
+
+class _LinkParser(HTMLParser):
+    """Collects the href attribute of every <a> tag."""
+
+    def __init__(self):
+        super().__init__()
+        self.hrefs = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "a":
+            return
+        for name, value in attrs:
+            if name == "href" and value:
+                self.hrefs.append(value)
+                return
+
+
+class _FlagParser(HTMLParser):
+    """Collects the text of every <h3 class='secret_flag'> tag, stripping the
+    'FLAG: ' prefix. The text comes through handle_data while we're inside the
+    tag, so we just buffer until the closing tag."""
+
+    PREFIX = "FLAG: "
+
+    def __init__(self):
+        super().__init__()
+        self.flags = []
+        self._depth = 0
+        self._buf = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "h3":
+            return
+        attr_dict = dict(attrs)
+        classes = (attr_dict.get("class") or "").split()
+        if "secret_flag" in classes:
+            self._depth += 1
+            self._buf = []
+
+    def handle_endtag(self, tag):
+        if tag != "h3" or self._depth == 0:
+            return
+        self._depth -= 1
+        text = "".join(self._buf).strip()
+        if text.startswith(self.PREFIX):
+            self.flags.append(text[len(self.PREFIX):].strip())
+        self._buf = []
+
+    def handle_data(self, data):
+        if self._depth > 0:
+            self._buf.append(data)
+
+
+def _find_csrf_token(html_text):
+    """Pull the value of <input name='csrfmiddlewaretoken' value='...'> from
+    the login form."""
+
+    class _CSRFParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.token = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag != "input" or self.token is not None:
+                return
+            attr_dict = dict(attrs)
+            if attr_dict.get("name") == "csrfmiddlewaretoken":
+                self.token = attr_dict.get("value")
+
+    parser = _CSRFParser()
+    parser.feed(html_text)
+    return parser.token
+
+
+def _path_from_location(location):
+    """Location: header values may be absolute URLs or bare paths; we only
+    care about the path+query our client can hit."""
+    parts = urlsplit(location)
+    return urlunsplit(("", "", parts.path or "/", parts.query, ""))
 
 
 class Crawler:
@@ -33,41 +115,105 @@ class Crawler:
         self.visited = set()        # paths already crawled
         self.flags = []             # secret flags found
 
-    # ----- TODO: login -----------------------------------------------------
+
     def login(self):
-        """Log in to Fakebook.
+        # GET to pick up the csrftoken cookie and the hidden form token.
+        page = self.client.get(LOGIN_PATH)
+        csrf_field = _find_csrf_token(page.body)
+        csrf_cookie = self.client.get_cookie("csrftoken")
+        if not csrf_field or not csrf_cookie:
+            raise RuntimeError("could not find CSRF token on the login page")
 
-        1. GET LOGIN_PATH. The client grabs the csrftoken cookie on its own
-           (see client.get_cookie('csrftoken')).
-        2. Parse the form for the hidden 'csrfmiddlewaretoken' field.
-        3. POST username, password, csrfmiddlewaretoken, next=/fakebook/.
-           The client sends the cookie and stores the sessionid it gets back.
-        4. Follow the 302 on success.
+        # Django's HTTPS CSRF check rejects POSTs without a same-origin Referer.
+        referer = "https://%s%s" % (self.server, LOGIN_PATH)
+        form = {
+            "username": self.username,
+            "password": self.password,
+            "csrfmiddlewaretoken": csrf_field,
+            "next": "/fakebook/",
+        }
+        response = self.client.post(LOGIN_PATH, form, extra_headers={"Referer": referer})
 
-        Note: the CSRF token shows up in both a cookie and a hidden field.
-        """
-        raise NotImplementedError("teammate: implement login()")
+        # Follow redirects until we land on a 2xx (or a non-redirect error).
+        hops = 0
+        while response.status in (301, 302) and hops < 10:
+            location = response.headers.get("location")
+            if not location:
+                break
+            response = self.client.get(_path_from_location(location))
+            hops += 1
 
-    # ----- TODO: HTML parsing ----------------------------------------------
-    def extract_links(self, html):
-        """Return in-domain /fakebook/ paths from <a href> tags. Use
-        html.parser. Drop external domains and non-/fakebook/ links."""
-        raise NotImplementedError("teammate: implement extract_links()")
+        if response.status != 200 or self.client.get_cookie("sessionid") is None:
+            raise RuntimeError(
+                "login failed: status=%d, sessionid=%r"
+                % (response.status, self.client.get_cookie("sessionid"))
+            )
 
-    def extract_flags(self, html):
-        """Return the 64-char flags from
-        <h3 class='secret_flag' ...>FLAG: ...</h3> (without the 'FLAG: ')."""
-        raise NotImplementedError("teammate: implement extract_flags()")
 
-    # ----- TODO: crawl loop ------------------------------------------------
+    def extract_links(self, html_text):
+        parser = _LinkParser()
+        parser.feed(html_text)
+        paths = []
+        for href in parser.hrefs:
+            path = self._normalize_link(href)
+            if path is not None:
+                paths.append(path)
+        return paths
+
+    def extract_flags(self, html_text):
+        parser = _FlagParser()
+        parser.feed(html_text)
+        return parser.flags
+
+    def _normalize_link(self, href):
+        """Turn an href into a same-server path under /fakebook/, or None."""
+        if not href:
+            return None
+        parts = urlsplit(href)
+        if parts.netloc and parts.netloc != self.server and parts.hostname != self.server:
+            return None
+        if not parts.path.startswith("/fakebook/"):
+            return None
+        return urlunsplit(("", "", parts.path, parts.query, ""))
+
+
     def crawl(self):
-        """Pull paths off the frontier, GET them, and collect links + flags
-        until NUM_FLAGS are found. 503 is already retried by the client.
-          200 -> parse links + flags
-          302 -> requeue the Location header
-          403/404 -> drop the path
-        Skip visited paths so A<->B friend links don't loop."""
-        raise NotImplementedError("teammate: implement crawl()")
+        while self.frontier and len(self.flags) < NUM_FLAGS:
+            path = self.frontier.pop()
+            if path in self.visited:
+                continue
+            self.visited.add(path)
+
+            try:
+                response = self.client.get(path)
+            except (ConnectionError, OSError):
+                # Transient network issue - put it back and try later.
+                self.visited.discard(path)
+                self.frontier.append(path)
+                continue
+
+            status = response.status
+            if status == 200:
+                for flag in self.extract_flags(response.body):
+                    if flag not in self.flags:
+                        self.flags.append(flag)
+                        if len(self.flags) >= NUM_FLAGS:
+                            return
+                for link in self.extract_links(response.body):
+                    if link not in self.visited:
+                        self.frontier.append(link)
+            elif status in (301, 302):
+                location = response.headers.get("location")
+                if not location:
+                    continue
+                target = self._normalize_link(location)
+                if target and target not in self.visited:
+                    self.frontier.append(target)
+            elif status in (403, 404):
+                continue
+            else:
+                # Unexpected status: drop it rather than spin.
+                continue
 
     def run(self):
         self.login()
