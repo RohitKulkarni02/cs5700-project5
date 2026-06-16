@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Raw HTTP/1.1 over TLS for the Fakebook crawler.
-
-Handles the parts we can't use a library for: building requests, parsing
-responses, chunked decoding, gzip, and cookies. The crawler only uses
-HTTPClient.get/post and the returned HTTPResponse.
-"""
 
 import gzip
 import socket
@@ -19,7 +12,10 @@ RECV_SIZE = 65536
 
 
 class HTTPResponse:
-    """status (int), reason (str), headers (dict, lowercase keys), body (str)."""
+    """
+    A parsed response: status (int), reason (str), headers (dict with
+    lowercase keys), and body (str, already decoded).
+    """
 
     def __init__(self, status, reason, headers, body):
         self.status = status
@@ -36,8 +32,10 @@ class HTTPResponse:
 
 
 class _SocketReader:
-    """Buffers socket reads so we can grab whole lines or exact byte counts
-    without reading past the end of one response."""
+    """
+    Buffers socket reads so we can pull off whole lines or exact byte counts
+    without reading past the end of one response.
+    """
 
     def __init__(self, sock):
         self.sock = sock
@@ -63,8 +61,10 @@ class _SocketReader:
 
 
 class HTTPClient:
-    """HTTP/1.1 client over one keep-alive (TLS) connection. Reconnects if the
-    server drops it, and keeps a cookie jar so the crawler ignores cookies."""
+    """
+    HTTP/1.1 client over one keep-alive (TLS) connection. Reconnects if the
+    server drops it and keeps a cookie jar so the crawler ignores cookies.
+    """
 
     def __init__(self, host, port, use_tls=True):
         self.host = host
@@ -72,9 +72,7 @@ class HTTPClient:
         self.use_tls = use_tls
         self.sock = None
         self.reader = None
-        self.cookies = {}  # name -> value
-
-    # ----- connection management -------------------------------------------
+        self.cookies = {}
 
     def connect(self):
         raw = socket.create_connection((self.host, self.port))
@@ -96,13 +94,11 @@ class HTTPClient:
         if self.sock is None:
             self.connect()
 
-    # ----- cookie jar ------------------------------------------------------
-
     def get_cookie(self, name):
         return self.cookies.get(name)
 
     def _store_cookies(self, headers_list):
-        # Use the raw header list, not the dict, since a response can have
+        # Use the raw header list, not the dict, since a response can carry
         # several Set-Cookie lines.
         for name, value in headers_list:
             if name.lower() != "set-cookie":
@@ -118,19 +114,18 @@ class HTTPClient:
             return None
         return "; ".join("%s=%s" % (k, v) for k, v in self.cookies.items())
 
-    # ----- public request API ---------------------------------------------
-
     def get(self, path, extra_headers=None):
+        """Send a GET and return the HTTPResponse."""
+
         return self._request_with_retry("GET", path, None, extra_headers)
 
     def post(self, path, form_fields, extra_headers=None):
         """POST a dict as application/x-www-form-urlencoded."""
+
         body = urlencode(form_fields).encode("ascii")
         headers = dict(extra_headers or {})
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         return self._request_with_retry("POST", path, body, headers)
-
-    # ----- request internals ----------------------------------------------
 
     def _request_with_retry(self, method, path, body, extra_headers):
         # Retry 503 here; every other status goes back to the caller.
@@ -181,6 +176,7 @@ class HTTPClient:
         status, reason = self._read_status_line()
         headers_list = self._read_headers()
         self._store_cookies(headers_list)
+
         # dict with lowercase keys, last value wins.
         headers = {}
         for name, value in headers_list:
@@ -195,8 +191,8 @@ class HTTPClient:
         return HTTPResponse(status, reason, headers, body)
 
     def _read_status_line(self):
-        line = self.reader.read_line().decode("iso-8859-1")
         # "HTTP/1.1 200 OK"
+        line = self.reader.read_line().decode("iso-8859-1")
         parts = line.split(" ", 2)
         if len(parts) < 2:
             raise ConnectionError("malformed status line: %r" % line)
@@ -227,8 +223,8 @@ class HTTPClient:
     def _read_chunked(self):
         body = b""
         while True:
-            size_line = self.reader.read_line().decode("iso-8859-1")
             # Chunk size, ignoring any ';' extensions.
+            size_line = self.reader.read_line().decode("iso-8859-1")
             size = int(size_line.split(";", 1)[0].strip(), 16)
             if size == 0:
                 # Skip optional trailers up to the final blank line.

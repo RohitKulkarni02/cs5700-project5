@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-Fakebook web crawler.
-
-    ./4700crawler [-s server] [-p port] <username> <password>
-
-The HTTP/TLS layer lives in http_client.py and is done. The methods marked
-TODO below are the crawl logic and still need to be written. The crawler only
-uses client.get/post and the HTTPResponse they return.
-"""
 
 import argparse
 from html.parser import HTMLParser
@@ -24,7 +15,7 @@ NUM_FLAGS = 5
 
 
 class _LinkParser(HTMLParser):
-    """Collects the href attribute of every <a> tag."""
+    """Collects the href of every <a> tag."""
 
     def __init__(self):
         super().__init__()
@@ -40,9 +31,11 @@ class _LinkParser(HTMLParser):
 
 
 class _FlagParser(HTMLParser):
-    """Collects the text of every <h3 class='secret_flag'> tag, stripping the
-    'FLAG: ' prefix. The text comes through handle_data while we're inside the
-    tag, so we just buffer until the closing tag."""
+    """
+    Collects the text of every <h3 class='secret_flag'> tag. The text arrives
+    through handle_data while we are inside the tag, so we buffer it until the
+    closing tag and then strip the 'FLAG: ' prefix.
+    """
 
     PREFIX = "FLAG: "
 
@@ -55,8 +48,7 @@ class _FlagParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag != "h3":
             return
-        attr_dict = dict(attrs)
-        classes = (attr_dict.get("class") or "").split()
+        classes = (dict(attrs).get("class") or "").split()
         if "secret_flag" in classes:
             self._depth += 1
             self._buf = []
@@ -76,8 +68,7 @@ class _FlagParser(HTMLParser):
 
 
 def _find_csrf_token(html_text):
-    """Pull the value of <input name='csrfmiddlewaretoken' value='...'> from
-    the login form."""
+    """Return the value of the hidden csrfmiddlewaretoken input, or None."""
 
     class _CSRFParser(HTMLParser):
         def __init__(self):
@@ -97,8 +88,8 @@ def _find_csrf_token(html_text):
 
 
 def _path_from_location(location):
-    """Location: header values may be absolute URLs or bare paths; we only
-    care about the path+query our client can hit."""
+    """Reduce a Location header (absolute URL or bare path) to path+query."""
+
     parts = urlsplit(location)
     return urlunsplit(("", "", parts.path or "/", parts.query, ""))
 
@@ -115,9 +106,8 @@ class Crawler:
         self.visited = set()        # paths already crawled
         self.flags = []             # secret flags found
 
-
     def login(self):
-        # GET to pick up the csrftoken cookie and the hidden form token.
+        # GET first to pick up the csrftoken cookie and the hidden form token.
         page = self.client.get(LOGIN_PATH)
         csrf_field = _find_csrf_token(page.body)
         csrf_cookie = self.client.get_cookie("csrftoken")
@@ -134,7 +124,7 @@ class Crawler:
         }
         response = self.client.post(LOGIN_PATH, form, extra_headers={"Referer": referer})
 
-        # Follow redirects until we land on a 2xx (or a non-redirect error).
+        # Follow redirects until we land on a 2xx or a non-redirect error.
         hops = 0
         while response.status in (301, 302) and hops < 10:
             location = response.headers.get("location")
@@ -148,7 +138,6 @@ class Crawler:
                 "login failed: status=%d, sessionid=%r"
                 % (response.status, self.client.get_cookie("sessionid"))
             )
-
 
     def extract_links(self, html_text):
         parser = _LinkParser()
@@ -167,6 +156,7 @@ class Crawler:
 
     def _normalize_link(self, href):
         """Turn an href into a same-server path under /fakebook/, or None."""
+
         if not href:
             return None
         parts = urlsplit(href)
@@ -175,7 +165,6 @@ class Crawler:
         if not parts.path.startswith("/fakebook/"):
             return None
         return urlunsplit(("", "", parts.path, parts.query, ""))
-
 
     def crawl(self):
         while self.frontier and len(self.flags) < NUM_FLAGS:
