@@ -1,2 +1,2 @@
 all:
-	chmod +x 4700crawler
+	chmod +x crawler

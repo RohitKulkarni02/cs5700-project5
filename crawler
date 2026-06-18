@@ -2,7 +2,7 @@
 
 import argparse
 from html.parser import HTMLParser
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from http_client import HTTPClient
 
@@ -68,7 +68,7 @@ class _FlagParser(HTMLParser):
 
 
 def _find_csrf_token(html_text):
-    """Return the value of the hidden csrfmiddlewaretoken input, or None."""
+    """Returns the value of the hidden csrfmiddlewaretoken input, or None."""
 
     class _CSRFParser(HTMLParser):
         def __init__(self):
@@ -88,7 +88,7 @@ def _find_csrf_token(html_text):
 
 
 def _path_from_location(location):
-    """Reduce a Location header (absolute URL or bare path) to path+query."""
+    """Reduces a Location header, absolute URL or bare path to path+query."""
 
     parts = urlsplit(location)
     return urlunsplit(("", "", parts.path or "/", parts.query, ""))
@@ -139,12 +139,12 @@ class Crawler:
                 % (response.status, self.client.get_cookie("sessionid"))
             )
 
-    def extract_links(self, html_text):
+    def extract_links(self, html_text, base_path):
         parser = _LinkParser()
         parser.feed(html_text)
         paths = []
         for href in parser.hrefs:
-            path = self._normalize_link(href)
+            path = self._normalize_link(href, base_path)
             if path is not None:
                 paths.append(path)
         return paths
@@ -154,13 +154,15 @@ class Crawler:
         parser.feed(html_text)
         return parser.flags
 
-    def _normalize_link(self, href):
-        """Turn an href into a same-server path under /fakebook/, or None."""
+    def _normalize_link(self, href, base_path):
+        """Resolve href against the current page and keep it only if it is a
+        same-server path under /fakebook/."""
 
         if not href:
             return None
-        parts = urlsplit(href)
-        if parts.netloc and parts.netloc != self.server and parts.hostname != self.server:
+        base = "https://%s%s" % (self.server, base_path)
+        parts = urlsplit(urljoin(base, href))
+        if parts.hostname and parts.hostname != self.server:
             return None
         if not parts.path.startswith("/fakebook/"):
             return None
@@ -176,7 +178,6 @@ class Crawler:
             try:
                 response = self.client.get(path)
             except (ConnectionError, OSError):
-                # Transient network issue - put it back and try later.
                 self.visited.discard(path)
                 self.frontier.append(path)
                 continue
@@ -188,20 +189,19 @@ class Crawler:
                         self.flags.append(flag)
                         if len(self.flags) >= NUM_FLAGS:
                             return
-                for link in self.extract_links(response.body):
+                for link in self.extract_links(response.body, path):
                     if link not in self.visited:
                         self.frontier.append(link)
             elif status in (301, 302):
                 location = response.headers.get("location")
                 if not location:
                     continue
-                target = self._normalize_link(location)
+                target = self._normalize_link(location, path)
                 if target and target not in self.visited:
                     self.frontier.append(target)
             elif status in (403, 404):
                 continue
             else:
-                # Unexpected status: drop it rather than spin.
                 continue
 
     def run(self):

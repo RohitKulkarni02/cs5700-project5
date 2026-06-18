@@ -12,10 +12,7 @@ RECV_SIZE = 65536
 
 
 class HTTPResponse:
-    """
-    A parsed response: status (int), reason (str), headers (dict with
-    lowercase keys), and body (str, already decoded).
-    """
+    """Holds the status code, reason, headers dict, and decoded body."""
 
     def __init__(self, status, reason, headers, body):
         self.status = status
@@ -33,7 +30,7 @@ class HTTPResponse:
 
 class _SocketReader:
     """
-    Buffers socket reads so we can pull off whole lines or exact byte counts
+    Buffers socket reads so we can pull whole lines or exact byte counts
     without reading past the end of one response.
     """
 
@@ -115,7 +112,7 @@ class HTTPClient:
         return "; ".join("%s=%s" % (k, v) for k, v in self.cookies.items())
 
     def get(self, path, extra_headers=None):
-        """Send a GET and return the HTTPResponse."""
+        """Sends a GET and returns the HTTPResponse."""
 
         return self._request_with_retry("GET", path, None, extra_headers)
 
