@@ -32,7 +32,7 @@ The crawler prints exactly five lines to stdout, one flag per line. If there are
 `HTTPClient` wraps a single TCP socket in TLS and keeps it alive across requests, reconnecting if the server closes the connection. `get` and `post` build the request, send it, and return an `HTTPResponse` with the status, the headers (lowercased keys), and the decoded body.
 
 - Responses are read off a small buffered reader so we can grab header lines and exact byte counts without reading into the next response.
-- The body is read by `Content-Length` or by reassembling a chunked response, and then gzip/deflate decoded if the server compressed it.
+- The body is read by `Content-Length` or by reassembling a chunked response, and then gzip decoded if the server compressed it.
 - Cookies are managed here, every `Set-Cookie` is stored in a jar and sent back as a `Cookie` header on later requests, so the crawler never touches them.
 - A 503 is retried automatically, all other status codes are returned to the caller to handle.
 
@@ -56,4 +56,8 @@ The crawler logs in, then runs a frontier-based crawl from `/fakebook/`.
 
 ## Testing
 
-We tested the HTTP layer on its own against a live HTTPS server to confirm the TLS handshake, header parsing, chunked reassembly, gzip decoding, cookie storage, and keep-alive reuse all worked. We then ran `crawler` end to end against Fakebook with our own credentials and confirmed it logged in and printed five flags. We also checked that it handles 302 redirects, skips 403/404 pages, and stays on the target domain.
+Most of the debugging happened by printing raw responses while building the HTTP layer. We printed the status line and headers for the first few requests to Fakebook so we could see what the server actually sent. That is how we found it uses `Transfer-Encoding: chunked` and sometimes gzip, so our first version that only read by `Content-Length` got back partial or unreadable pages. We fixed the chunk reassembly and then checked it by printing the length of the body and looking for the closing `</html>`. One page also threw a `UnicodeDecodeError`, which is why the body is decoded with `errors="replace"`.
+
+Login took the most tries. The POST kept coming back without a `sessionid` cookie until we pulled `csrfmiddlewaretoken` out of the form and sent the `csrftoken` cookie back, and it still failed until we added the `Referer` header. We confirmed it by checking for the `sessionid` cookie and the 302 to `/fakebook/` before crawling.
+
+Once login worked we ran the full crawler against Fakebook. It logs in, crawls, and prints the five flags in about a minute. To check the loop handling we printed how many pages were visited and made sure the visited set stopped it from re-fetching the same profiles back and forth.

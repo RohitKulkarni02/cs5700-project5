@@ -3,7 +3,6 @@
 import gzip
 import socket
 import ssl
-import zlib
 from urllib.parse import urlencode
 
 
@@ -20,19 +19,9 @@ class HTTPResponse:
         self.headers = headers
         self.body = body
 
-    def __repr__(self):
-        return "<HTTPResponse %d %s, %d bytes>" % (
-            self.status,
-            self.reason,
-            len(self.body),
-        )
 
-
-class _SocketReader:
-    """
-    Buffers socket reads so we can pull whole lines or exact byte counts
-    without reading past the end of one response.
-    """
+class SocketReader:
+    """Buffers socket reads so we can read whole lines or exact byte counts."""
 
     def __init__(self, sock):
         self.sock = sock
@@ -58,10 +47,7 @@ class _SocketReader:
 
 
 class HTTPClient:
-    """
-    HTTP/1.1 client over one keep-alive (TLS) connection. Reconnects if the
-    server drops it and keeps a cookie jar so the crawler ignores cookies.
-    """
+    """HTTP/1.1 client over one keep-alive TLS connection with a cookie jar."""
 
     def __init__(self, host, port, use_tls=True):
         self.host = host
@@ -77,7 +63,7 @@ class HTTPClient:
             context = ssl.create_default_context()
             raw = context.wrap_socket(raw, server_hostname=self.host)
         self.sock = raw
-        self.reader = _SocketReader(raw)
+        self.reader = SocketReader(raw)
 
     def close(self):
         if self.sock is not None:
@@ -95,8 +81,7 @@ class HTTPClient:
         return self.cookies.get(name)
 
     def _store_cookies(self, headers_list):
-        # Use the raw header list, not the dict, since a response can carry
-        # several Set-Cookie lines.
+        # raw list, not the dict, since there can be multiple Set-Cookie headers
         for name, value in headers_list:
             if name.lower() != "set-cookie":
                 continue
@@ -112,7 +97,7 @@ class HTTPClient:
         return "; ".join("%s=%s" % (k, v) for k, v in self.cookies.items())
 
     def get(self, path, extra_headers=None):
-        """Sends a GET and returns the HTTPResponse."""
+        """Send a GET and return the HTTPResponse."""
 
         return self._request_with_retry("GET", path, None, extra_headers)
 
@@ -125,7 +110,7 @@ class HTTPClient:
         return self._request_with_retry("POST", path, body, headers)
 
     def _request_with_retry(self, method, path, body, extra_headers):
-        # Retry 503 here; every other status goes back to the caller.
+        # retry 503, return everything else to the caller
         attempts = 0
         while True:
             response = self._request_once(method, path, body, extra_headers)
@@ -135,7 +120,7 @@ class HTTPClient:
             return response
 
     def _request_once(self, method, path, body, extra_headers):
-        # If a kept-alive socket was closed under us, reconnect and try once more.
+        # retry once if the keep-alive connection was dropped
         for attempt in range(2):
             self._ensure_connection()
             try:
@@ -174,7 +159,7 @@ class HTTPClient:
         headers_list = self._read_headers()
         self._store_cookies(headers_list)
 
-        # dict with lowercase keys, last value wins.
+        # lowercase the header keys
         headers = {}
         for name, value in headers_list:
             headers[name.lower()] = value
@@ -214,17 +199,17 @@ class HTTPClient:
             return self._read_chunked()
         if "content-length" in headers:
             return self.reader.read_exactly(int(headers["content-length"]))
-        # No length, not chunked: e.g. a 302 with no body.
+        # no body (e.g. a 302)
         return b""
 
     def _read_chunked(self):
         body = b""
         while True:
-            # Chunk size, ignoring any ';' extensions.
+            # chunk size, ignoring any ; extensions
             size_line = self.reader.read_line().decode("iso-8859-1")
             size = int(size_line.split(";", 1)[0].strip(), 16)
             if size == 0:
-                # Skip optional trailers up to the final blank line.
+                # skip trailers up to the blank line
                 while self.reader.read_line() != b"":
                     pass
                 break
@@ -233,15 +218,6 @@ class HTTPClient:
         return body
 
     def _decode_body(self, headers, raw_body):
-        encoding = headers.get("content-encoding", "").lower()
-        if encoding == "gzip":
-            try:
-                raw_body = gzip.decompress(raw_body)
-            except (OSError, EOFError):
-                pass
-        elif encoding == "deflate":
-            try:
-                raw_body = zlib.decompress(raw_body)
-            except zlib.error:
-                raw_body = zlib.decompress(raw_body, -zlib.MAX_WBITS)
+        if headers.get("content-encoding", "").lower() == "gzip":
+            raw_body = gzip.decompress(raw_body)
         return raw_body.decode("utf-8", errors="replace")
