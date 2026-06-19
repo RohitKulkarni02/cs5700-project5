@@ -10,9 +10,8 @@ MAX_503_RETRIES = 50
 RECV_SIZE = 65536
 
 
+# parsed response: status, reason, headers dict, decoded body
 class HTTPResponse:
-    """Holds the status code, reason, headers dict, and decoded body."""
-
     def __init__(self, status, reason, headers, body):
         self.status = status
         self.reason = reason
@@ -20,9 +19,8 @@ class HTTPResponse:
         self.body = body
 
 
+# buffered reader so we can pull whole lines or exact byte counts
 class SocketReader:
-    """Buffers socket reads so we can read whole lines or exact byte counts."""
-
     def __init__(self, sock):
         self.sock = sock
         self.buf = b""
@@ -46,9 +44,8 @@ class SocketReader:
         return data
 
 
+# http/1.1 over one keep-alive tls connection, with its own cookie jar
 class HTTPClient:
-    """HTTP/1.1 client over one keep-alive TLS connection with a cookie jar."""
-
     def __init__(self, host, port, use_tls=True):
         self.host = host
         self.port = port
@@ -97,13 +94,10 @@ class HTTPClient:
         return "; ".join("%s=%s" % (k, v) for k, v in self.cookies.items())
 
     def get(self, path, extra_headers=None):
-        """Send a GET and return the HTTPResponse."""
-
         return self._request_with_retry("GET", path, None, extra_headers)
 
     def post(self, path, form_fields, extra_headers=None):
-        """POST a dict as application/x-www-form-urlencoded."""
-
+        # post a dict as form-urlencoded
         body = urlencode(form_fields).encode("ascii")
         headers = dict(extra_headers or {})
         headers["Content-Type"] = "application/x-www-form-urlencoded"
@@ -218,6 +212,6 @@ class HTTPClient:
         return body
 
     def _decode_body(self, headers, raw_body):
-        if headers.get("content-encoding", "").lower() == "gzip":
+        if raw_body and headers.get("content-encoding", "").lower() == "gzip":
             raw_body = gzip.decompress(raw_body)
         return raw_body.decode("utf-8", errors="replace")

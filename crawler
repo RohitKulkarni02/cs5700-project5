@@ -14,9 +14,8 @@ ROOT_PATH = "/fakebook/"
 NUM_FLAGS = 5
 
 
+# grab the href from every <a> tag
 class LinkParser(HTMLParser):
-    """Collects the href of every <a> tag."""
-
     def __init__(self):
         super().__init__()
         self.hrefs = []
@@ -30,9 +29,8 @@ class LinkParser(HTMLParser):
                 return
 
 
+# collect text inside <h3 class='secret_flag'> tags
 class FlagParser(HTMLParser):
-    """Collects the text inside <h3 class='secret_flag'> tags."""
-
     PREFIX = "FLAG: "
 
     def __init__(self):
@@ -61,8 +59,7 @@ class FlagParser(HTMLParser):
 
 
 def find_csrf_token(html_text):
-    """Returns the value of the hidden csrfmiddlewaretoken input, or None."""
-
+    # value of the hidden csrfmiddlewaretoken input, or none
     class CsrfParser(HTMLParser):
         def __init__(self):
             super().__init__()
@@ -81,8 +78,7 @@ def find_csrf_token(html_text):
 
 
 def path_from_location(location):
-    """Reduces a Location header to just the path and query."""
-
+    # reduce a location header to just path + query
     parts = urlsplit(location)
     return urlunsplit(("", "", parts.path or "/", parts.query, ""))
 
@@ -107,7 +103,7 @@ class Crawler:
         if not csrf_field or not csrf_cookie:
             raise RuntimeError("could not find CSRF token on the login page")
 
-        # need a Referer or the csrf check fails
+        # need a referer header or the csrf check fails
         referer = "https://%s%s" % (self.server, LOGIN_PATH)
         form = {
             "username": self.username,
@@ -148,9 +144,7 @@ class Crawler:
         return parser.flags
 
     def _normalize_link(self, href, base_path):
-        """Resolve href against the current page and keep it only if it is a
-        same-server path under /fakebook/."""
-
+        # resolve href against the current page, keep only same-server /fakebook/ paths
         if not href:
             return None
         base = "https://%s%s" % (self.server, base_path)
