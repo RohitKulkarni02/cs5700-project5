@@ -82,7 +82,6 @@ class HTTPClient:
         for name, value in headers_list:
             if name.lower() != "set-cookie":
                 continue
-            # "sessionid=abc123; Path=/; HttpOnly" -> sessionid=abc123
             cookie = value.split(";", 1)[0].strip()
             if "=" in cookie:
                 cname, cval = cookie.split("=", 1)
@@ -193,22 +192,19 @@ class HTTPClient:
             return self._read_chunked()
         if "content-length" in headers:
             return self.reader.read_exactly(int(headers["content-length"]))
-        # no body (e.g. a 302)
         return b""
 
     def _read_chunked(self):
         body = b""
         while True:
-            # chunk size, ignoring any ; extensions
             size_line = self.reader.read_line().decode("iso-8859-1")
             size = int(size_line.split(";", 1)[0].strip(), 16)
             if size == 0:
-                # skip trailers up to the blank line
                 while self.reader.read_line() != b"":
                     pass
                 break
             body += self.reader.read_exactly(size)
-            self.reader.read_exactly(2)  # CRLF after each chunk
+            self.reader.read_exactly(2)
         return body
 
     def _decode_body(self, headers, raw_body):

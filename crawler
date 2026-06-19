@@ -91,9 +91,9 @@ class Crawler:
         self.password = args.password
         self.client = HTTPClient(self.server, self.port, use_tls=True)
 
-        self.frontier = []          # paths still to visit
-        self.visited = set()        # paths already crawled
-        self.flags = []             # secret flags found
+        self.frontier = []
+        self.visited = set()
+        self.flags = []
 
     def login(self):
         # get the login page for the csrf token and cookie

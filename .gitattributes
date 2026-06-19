@@ -1,0 +1,4 @@
+* text=auto eol=lf
+crawler text eol=lf
+*.py text eol=lf
+Makefile text eol=lf

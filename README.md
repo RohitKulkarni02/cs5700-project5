@@ -34,7 +34,7 @@ The crawler prints exactly five lines to stdout, one flag per line. If there are
 - Responses are read off a small buffered reader so we can grab header lines and exact byte counts without reading into the next response.
 - The body is read by `Content-Length` or by reassembling a chunked response, and then gzip decoded if the server compressed it.
 - Cookies are managed here, every `Set-Cookie` is stored in a jar and sent back as a `Cookie` header on later requests, so the crawler never touches them.
-- A 503 is retried automatically, all other status codes are returned to the caller to handle.
+- To avoid hanging forever due to a broken server, 503 responses are retried upto 50 times.
 
 ### Crawler (`crawler`)
 
